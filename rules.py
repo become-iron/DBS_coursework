@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
-""" Реализация правил в ВСПТД """
+""" Реализация ДМВ в ВСПТД """
 
 # WARN TEMP в настоящий момент работа осуществляется только с SQLite
-# WARN в некоторых местах не используется экранирование, т.о. потенциально небезопасно
+# WARN выполнение действия НАЙТИ_В_БД потенциально небезопасно
 
 import re
-from sqlalchemy import create_engine, Table, MetaData, Column
+from sqlalchemy import create_engine, Table, MetaData, Column, select, func, and_
 from functools import lru_cache
 from os.path import isfile as exists_file
 
 from vsptd import Trp, TrpStr, parse_trp_str, check_condition, RE_PREFIX_NAME_NI, RE_PREFIX_NAME_WODS_NI
-from getVoc import trpGetOntVocSQL
+from getVoc import trpGetOntVoc
 
 # TEMP
-agent_tbl_nm = 'AGENTS'  # название таблицы в базе метаданных с данными таблиц агентов
+_tmp_agent_tbl_nm = 'AGENTS'  # название таблицы в базе метаданных с данными таблиц агентов
+_tmp_ont_dict_nm = 'OSl_test_1'
 # префикс и имя для выборки инструментов из базы
-_prefix = 'E'
-_name = 'NM'
+_tmp_prefix = 'E'
+_tmp_name = 'NM'
 
 RE_RULE = re.compile('^ЕСЛИ (.+) ТО (.+);$')  # правило
 RE_ACT_FIND_IN_DB = re.compile(r'^НАЙТИ_В_БД\((.*)\)$')  # искать в БД
@@ -77,6 +78,7 @@ def exec_rule(rule, ctx):
             self.path_mdb = data['path_mdb']
             self.type_mdb = data['type_mdb']
             self.agent = data['agent']
+            self.engine_db = _create_engine(self.path_db, self.type_db)
 
     # context
     ctx = Context(ctx)
@@ -88,7 +90,7 @@ def exec_rule(rule, ctx):
     cond, action = parsed_rule[0][0], parsed_rule[0][1]
 
     # проверка истинности условия
-    cond_result = check_condition(ctx.trp_str, cond, ctx.trp_str_from_db)
+    cond_result = check_condition(cond, ctx.trp_str, ctx.trp_str_from_db)
     if not cond_result:
         return None
 
@@ -105,23 +107,23 @@ def exec_rule(rule, ctx):
             trp_cond = re.findall(RE_ACT_FIND_IN_DB, action)[0]
 
         # формирование sql-запроса
-        nm_of_agent_tbl = _determine_table_of_agent(ctx)
+        # WARN небезопасно; как переписать?
+        nm_of_agent_tbl = _determine_table_of_agent(ctx.path_mdb, ctx.type_mdb, ctx.agent)
         trp_cond = _replace_val_of_trps(trp_cond, ctx)
         # имя колонки с назв. инструментов для данн. агента
-        nm_of_instr_cln = trpGetOntVocSQL(_prefix, _name, ctx.path_mdb, ctx.type_mdb)[(ctx.agent, 'NAME')]
+        nm_of_instr_cln = trpGetOntVoc(_tmp_prefix, _tmp_name, ctx.type_mdb, ctx.path_mdb, _tmp_ont_dict_nm)[(ctx.agent, 'NAME')]
         sql_query = 'SELECT ' + nm_of_instr_cln + ' ' \
                     'FROM ' + nm_of_agent_tbl + ' ' \
                     'WHERE ' + trp_cond
         if is_order:
             sql_query += ' ORDER BY ' + order_by + ' ' + type_of_order
 
-        engine = _create_engine(ctx.path_db, ctx.type_db)
-        query_result = engine.execute(sql_query).fetchall()
+        query_result = ctx.engine_db.execute(sql_query).fetchall()
 
         # формирование трипл. строки по результатам запроса
         # к новым триплетам с повторяющимся префиксом к последнему прибавляется порядковый номер: E, E1, E2 и т.д.
         result = TrpStr(*(
-            Trp(_prefix if i == 0 else _prefix + str(i), _name, instr[0])
+            Trp(_tmp_prefix if i == 0 else _tmp_prefix + str(i), _tmp_name, instr[0])
             for i, instr in enumerate(query_result)
         ))
 
@@ -131,24 +133,16 @@ def exec_rule(rule, ctx):
     elif re.match(RE_ACT_ADD_IN_DB, action) is not None:
         prefix = re.findall(RE_ACT_ADD_IN_DB, action)[0]
 
-        rslt, prms_for_query, nm_of_agent_tbl, WHERE_vals = _make_context_for_action(prefix, ctx)
+        rslt, prms_for_query, tbl, where_vals = _make_context_for_action(prefix, ctx)
 
         # в таблице уже есть значения
         if rslt > 0:
             return False
 
         # формирование sql-запроса
-        # colons = prms_for_query.keys()
-        # VALUES_vals = tuple(prms_for_query[colon] for colon in colons)
-        columns = tuple(Column(col) for col in prms_for_query)
-        tbl = Table(nm_of_agent_tbl, MetaData(), *columns)
         sql_query = tbl.insert().values(**prms_for_query)
-        # sql_query = 'INSERT INTO ' + nm_of_agent_tbl + ' ' + \
-        #             str(tuple(colons)) + ' ' \
-        #             'VALUES ' + str(VALUES_vals)
 
-        engine = _create_engine(ctx.path_db, ctx.type_db)
-        engine.execute(sql_query)
+        ctx.engine_db.execute(sql_query)
 
         return True
 
@@ -156,17 +150,16 @@ def exec_rule(rule, ctx):
     elif re.match(RE_ACT_DEL_FROM_DB, action) is not None:
         prefix = re.findall(RE_ACT_DEL_FROM_DB, action)[0]
 
-        rslt, prms_for_query, nm_of_agent_tbl, WHERE_vals = _make_context_for_action(prefix, ctx)
+        rslt, prms_for_query, tbl, where_vals = _make_context_for_action(prefix, ctx)
 
         # в таблице отстутствуют значения
         if rslt == 0:
             return False
 
         # формирование sql-запроса
-        sql_query = 'DELETE FROM ' + nm_of_agent_tbl + ' ' + \
-                    'WHERE ' + WHERE_vals
-        engine = _create_engine(ctx.path_db, ctx.type_db)
-        engine.execute(sql_query)
+        sql_query = tbl.delete().where(and_(*where_vals))
+
+        ctx.engine_db.execute(sql_query)
 
         return True
 
@@ -207,7 +200,7 @@ def _replace_val_of_trps(str_to_rpl, ctx):
     # поиск значений триплетов для SQL-запроса в базе согласно заданному агенту
     for trp in re.findall(RE_PREFIX_NAME_WODS_NI, str_to_rpl):
         prefix, name = trp.split('.')
-        result = trpGetOntVocSQL(prefix, name, ctx.path_mdb, ctx.type_mdb)[(ctx.agent, 'NAME')]
+        result = trpGetOntVoc(prefix, name, ctx.type_mdb, ctx.path_mdb, _tmp_ont_dict_nm)[(ctx.agent, 'NAME')]
         str_to_rpl = str_to_rpl.replace(trp, result)
 
     return str_to_rpl
@@ -220,40 +213,35 @@ def _make_context_for_action(prefix, ctx):
     необходимо выбрать все триплеты из переданной трипл. строки
     """
     # TODO CHECK оптимизировать
-    prms_for_query = {trpGetOntVocSQL(trp.prefix, trp.name, ctx.path_mdb, ctx.type_mdb)[(ctx.agent, 'NAME')]: trp.value
+    prms_for_query = {trpGetOntVoc(trp.prefix, trp.name, ctx.type_mdb, ctx.path_mdb, _tmp_ont_dict_nm)[(ctx.agent, 'NAME')]: trp.value
                       for trp in ctx.trp_str[prefix]
                       }
-    nm_of_agent_tbl = _determine_table_of_agent(ctx)
+    nm_of_agent_tbl = _determine_table_of_agent(ctx.path_mdb, ctx.type_mdb, ctx.agent)
 
     # формирование sql-запроса на проверку наличия инструмента в базе
-    # формирование значений для конструкции WHERE
-    WHERE_vals = ''
-    for i, key in enumerate(prms_for_query):
-        WHERE_vals += key + '='
-        WHERE_vals += "'{}'".format(prms_for_query[key]) \
-            if isinstance(prms_for_query[key], str) \
-            else str(prms_for_query[key])
-        if i < len(prms_for_query) - 1:
-            WHERE_vals += ' AND '
-    sql_query = 'SELECT COUNT (*) ' \
-                'FROM ' + nm_of_agent_tbl + ' ' \
-                'WHERE ' + WHERE_vals
+    columns = tuple(Column(col) for col in prms_for_query)
+    tbl = Table(nm_of_agent_tbl, MetaData(), *columns)
+    where_vals = tuple(getattr(tbl.c, col) == prms_for_query[col] for col in prms_for_query)
+    sql_query = select([func.count(tbl)]).where(and_(*where_vals))
 
-    engine = _create_engine(ctx.path_db, ctx.type_db)
-    rslt = engine.execute(sql_query).scalar()
+    rslt = ctx.engine_db.execute(sql_query).scalar()
 
-    return rslt, prms_for_query, nm_of_agent_tbl, WHERE_vals
+    return rslt, prms_for_query, tbl, where_vals
 
 
-@lru_cache(maxsize=8)  # кэширование запросов
-def _determine_table_of_agent(ctx):
+@lru_cache(maxsize=4)  # кэширование запросов
+def _determine_table_of_agent(path_mdb, type_mdb, agent):
     """ОПРЕДЕЛЕНИЕ ПО ИМЕНИ АГЕНТА НАЗВАНИЯ СООТВЕТСТВУЮЩЕЙ ТАБЛИЦЫ"""
-    engine = _create_engine(ctx.path_mdb, ctx.type_mdb)
-    sql_query = 'SELECT DB FROM ' + agent_tbl_nm + ' WHERE NAME=:agent'  # TEMP используется DB для названия таблицы
-    nm_of_agent_tbl = engine.execute(sql_query, agent=ctx.agent).scalar()
+    # TEMP используются DB и NAME для названий столбцов в таблице
+    tbl = Table(_tmp_agent_tbl_nm, MetaData(), Column('DB'), Column('NAME'))
+    sql_query = select([tbl]).where(getattr(tbl.c, 'NAME') == agent)
+
+    engine = _create_engine(path_mdb, type_mdb)
+    nm_of_agent_tbl = engine.execute(sql_query).scalar()
     return nm_of_agent_tbl
 
 
+@lru_cache(maxsize=8)  # кэширование запросов
 def _create_engine(path_db, type_db):
     """Создание объекта-движка для определённой БД"""
     # TODO возможны различные тонкости при подключении к базам данных
@@ -266,8 +254,6 @@ def _create_engine(path_db, type_db):
         db_mark = r'sqlite:///'
     elif type_db == 'MS SQL Server' or type_db == 2:
         pass
-    elif type_db == 'MongoDB' or type_db == 3:
-        pass
     else:
         raise ValueError('Неподдерживаемая СУБД: ' + str(type_db))
-    return create_engine(db_mark + path_db)
+    return create_engine(db_mark + path_db, echo=False)
