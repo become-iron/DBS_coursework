@@ -3,7 +3,7 @@
 import sys
 sys.path.append('..\\')
 
-from rules import exec_rule
+from dmo import exec_rule
 
 
 # контекст
