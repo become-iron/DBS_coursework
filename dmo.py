@@ -72,7 +72,8 @@ def exec_rule(rule, ctx):
             agent (str) - имя агента
     Возвращает:
         НАЙТИ_В_БД(ПАРАМЕТРЫ)
-            (TrpStr) - результаты поискового запроса. Вернётся пустая трипл. строка, если ничего не будет найдено
+            (str) - результаты поискового запроса в виде трипл. строки. Вернётся пустая трипл. строка, если ничего не
+            будет найдено
         ДОБАВИТЬ_В_БД(ПАРАМЕТРЫ)
             (True) - операция прошла успешно
             (False) - данные значения уже существуют в таблице
@@ -150,7 +151,7 @@ def exec_rule(rule, ctx):
                       Trp(p, _[1][0], row[1]) + \
                       Trp(p, _[2][0], row[2])
 
-        return result
+        return str(result)
 
     # ====================INSERT====================
     elif re.match(RE_ACT_ADD_IN_DB, action) is not None:
@@ -216,7 +217,6 @@ def _rewrite_cond(cond, ctx):
         prefix, name = trp.split('.')
         cln = _get_agent_tbl_cln(prefix, name, ctx)
         cond = cond.replace(trp, cln)
-    print(cond)
     return cond
 
 
