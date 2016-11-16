@@ -19,11 +19,10 @@ _tmp_agents_tbl_c_name = 'NAME'
 _tmp_agents_tbl_c_db = 'DB'
 # назв. таблицы в базе метаданных  с онтологическим словарём, определяющим характеристики объектов агентов
 _tmp_ont_dict_nm = 'OSl_test_1'
-# значения имени в триплете, опредляющем значения характеристики для агента
+# значения имени в триплете, определяющем название таблицы агента
 _tmp_agent_trp_nm = 'NAME'
-# префикс и имя для выборки инструментов из базы
-_tmp_prefix = 'E'
-_tmp_name = 'NM'
+# значения префикса и имени в триплете, определяющем имя в триплете для характеристик
+_tmp_argh = ('Q', 'NAME')
 
 RE_RULE = re.compile('^ЕСЛИ (.+) ТО (.+);$')  # правило
 RE_ACT_FIND_IN_DB = re.compile(r'^НАЙТИ_В_БД\((.*)\)$')  # искать в БД
@@ -37,9 +36,14 @@ def _get_agent_tbl_cln(prefix, name, ctx):
     ПО ПРЕФИКСУ И ИМЕНИ ТРИПЛЕТА ПОЛУЧИТЬ ИЗ ОНТОЛ. СЛОВАРЯ НАЗВАНИЕ СООТВ. СТОЛБЦА В ТАБЛИЦЕ АГЕНТА
     Обёртка функции trpGetOntVoc для более удобного её использовния
     """
-    _ = trpGetOntVoc(prefix, name, ctx.path_mdb, ctx.type_mdb, _tmp_ont_dict_nm)
-    _ = _[(ctx.agent, _tmp_agent_trp_nm)]  # альтернатива: [ctx.agent][0].value
-    return _
+    if name != '':
+        _ = trpGetOntVoc(prefix, name, ctx.path_mdb, ctx.type_mdb, _tmp_ont_dict_nm)
+        _ = _[0][(ctx.agent, _tmp_agent_trp_nm)]  # альтернатива: [ctx.agent][0].value
+        return _
+    else:
+        _ = trpGetOntVoc(prefix, name, ctx.path_mdb, ctx.type_mdb, _tmp_ont_dict_nm)
+        _ = tuple((row[_tmp_argh], row[(ctx.agent, _tmp_agent_trp_nm)]) for row in _)
+        return _
 
 
 def exec_rule(rule, ctx):
@@ -125,26 +129,26 @@ def exec_rule(rule, ctx):
             trp_cond = re.findall(RE_ACT_FIND_IN_DB, action)[0]
 
         # формирование sql-запроса
-        # WARN небезопасно; как переписать?
+        # WARN небезопасно; как переписать? (можно использовать библиотеку sqlparse для парсинга условия)
         nm_of_agent_tbl = _determine_table_of_agent(ctx.path_mdb, ctx.type_mdb, ctx.agent)
+        prefix = re.findall(RE_PREFIX_NAME_WODS_NI, trp_cond)[0].split('.')[0]
         trp_cond = _rewrite_cond(trp_cond, ctx)
-        # имя колонки с назв. инструментов для данн. агента
-        # WARN решается неверная задача - исправить
-        # _ = tuple()
-        nm_of_instr_cln = _get_agent_tbl_cln(_tmp_prefix, _tmp_name, ctx)
-        sql_query = 'SELECT ' + nm_of_instr_cln + ' ' \
+        _ = _get_agent_tbl_cln(prefix, '', ctx)
+        select_vals = str(tuple(cln[1] for cln in _))[1:-1].replace("'", '"')
+        sql_query = 'SELECT ' + select_vals + ' ' \
                     'FROM ' + nm_of_agent_tbl + ' ' \
                     'WHERE ' + trp_cond
         sql_query += order_value
 
         query_result = ctx.engine_db.execute(sql_query).fetchall()
-
         # формирование трипл. строки по результатам запроса
         # к новым триплетам с повторяющимся префиксом к последнему прибавляется порядковый номер: E, E1, E2 и т.д.
-        result = TrpStr(*(
-            Trp(_tmp_prefix if i == 0 else _tmp_prefix + str(i), _tmp_name, instr[0])
-            for i, instr in enumerate(query_result)
-        ))
+        result = TrpStr()
+        for i, row in enumerate(query_result):
+            p = prefix if i == 0 else prefix + str(i)
+            result += Trp(p, _[0][0], row[0]) + \
+                      Trp(p, _[1][0], row[1]) + \
+                      Trp(p, _[2][0], row[2])
 
         return result
 
@@ -179,41 +183,41 @@ def exec_rule(rule, ctx):
         raise ValueError('Неверный формат действия: ' + action)
 
 
-def _rewrite_cond(str_to_rpl, ctx):
+def _rewrite_cond(cond, ctx):
     """
     ПРИВЕСТИ УСЛОВИЕ ДЛЯ ЗАПРОСА К SQL-ФОРМАТУ
     Триплеты в параметрах действия правила без "$", заменяются соответствующими значениями из онтологического словаря
     согласно заданному агенту
     Принимает:
-        str_to_rpl (str) - условие для запроса
+        cond (str) - условие для запроса
         ctx (Context) - метаданные
     Возвращает:
         (str) - изменённое условие
     """
-    #  копипаст из check_condition
+    # копипаст из check_condition
     # замена операторов
     replacements = [[' или ', ' OR '],
                     [' и ',   ' AND '],
                     [' ИЛИ ', ' OR '],
                     [' И ',   ' AND ']]
     for rplc in replacements:
-        str_to_rpl = str_to_rpl.replace(rplc[0], rplc[1])
+        cond = cond.replace(rplc[0], rplc[1])
 
     # поиск триплетов в трипл. строке
-    for trp in re.findall(RE_PREFIX_NAME_NI, str_to_rpl):  # замена триплетов на их значения
+    for trp in re.findall(RE_PREFIX_NAME_NI, cond):  # замена триплетов на их значения
         value = ctx.trp_str[trp[1:]]  # получаем значение триплета
         if value is None:
             raise ValueError('Триплет {} не найден в триплексной строке'.format(trp))
         value = "'{}'".format(value) if isinstance(value, str) else str(value)  # приведение значений триплета к формату
-        str_to_rpl = str_to_rpl.replace(trp, value)
+        cond = cond.replace(trp, value)
 
     # поиск значений триплетов для SQL-запроса в базе согласно заданному агенту
-    for trp in re.findall(RE_PREFIX_NAME_WODS_NI, str_to_rpl):
+    for trp in re.findall(RE_PREFIX_NAME_WODS_NI, cond):
         prefix, name = trp.split('.')
         cln = _get_agent_tbl_cln(prefix, name, ctx)
-        str_to_rpl = str_to_rpl.replace(trp, cln)
-
-    return str_to_rpl
+        cond = cond.replace(trp, cln)
+    print(cond)
+    return cond
 
 
 def _make_context_for_action(prefix, ctx):
